@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>メニュー管理 | MateCook</title>
+<link rel="stylesheet" href="https://unpkg.com/@picocss/pico@latest/css/pico.min.css"/>
+<style>
+:root{
+  --bg:#0f0f0f;--fg:#f0f0f0;
+  --muted:#1f1f1f;--border:#444;
+  --accent:#2d8cf0;
+}
+html,body{background:var(--bg);color:var(--fg);}
+main{max-width:900px;margin-inline:auto;padding-block:1rem;}
+h1{color:#fff;margin-bottom:.7rem;}
+table,th,td{background:var(--muted);border-color:var(--border);color:var(--fg);}
+th{font-weight:600;}
+button.icon{padding:.25rem .45rem;font-size:.9rem;}
+dialog{max-width:620px;background:var(--muted);color:var(--fg);}
+input[type=text],select{
+  width:100%;background:#262626;color:#fff;border:1px solid var(--border);border-radius:5px;
+  padding:.4rem .5rem;
+}
+input[type=text]::placeholder{color:#888;}
+tbody tr:hover{background:#222;}
+</style>
+</head>
+<body>
+<main>
+  <h1>メニュー管理</h1>
+
+  <button id="addBtn" class="contrast">＋ 新規メニュー</button>
+
+  <table>
+    <thead><tr><th>ID</th><th>メニュー名</th><th>部材数</th><th style="text-align:center;">操作</th></tr></thead>
+    <tbody id="menuBody"></tbody>
+  </table>
+</main>
+
+<!-- ===== 編集モーダル ===== -->
+<dialog id="editDlg">
+<article>
+  <h3 id="dlgTitle">メニュー編集</h3>
+
+  <label>メニューID
+    <input type="text" id="menuId" placeholder="tonkatsu" required>
+  </label>
+  <label>メニュー名
+    <input type="text" id="menuName" placeholder="トンカツ御膳" required>
+  </label>
+
+  <h4>構成部材</h4>
+  <table style="margin-bottom:.5rem;">
+    <thead><tr><th>ラベル</th><th style="width:40%">担当</th><th></th></tr></thead>
+    <tbody id="partTbody"></tbody>
+  </table>
+  <button id="addPartBtn" class="secondary">＋ 部材追加</button>
+
+  <footer style="display:flex;gap:.6rem;justify-content:flex-end;margin-top:1rem;">
+    <button id="cancelEdit" class="secondary">キャンセル</button>
+    <button id="saveEdit"   class="contrast">保存</button>
+  </footer>
+</article>
+</dialog>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.2/firebase-app.js";
+import { getFirestore, collection, doc, getDoc,
+         setDoc, deleteDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.7.2/firebase-firestore.js";
+import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/10.7.2/firebase-auth.js";
+import { firebaseConfig } from "./firebase-config.js";
+
+/* ==== 定数 ==== */
+const ROLES={grill:"焼き場",pass:"デシャップ",fryer:"フライヤー",sashimi:"刺し場"};
+const app = initializeApp(firebaseConfig);
+const db  = getFirestore(app);
+await signInAnonymously(getAuth(app));
+
+/* ==== DOM ==== */
+const menuBody   = document.getElementById("menuBody");
+const editDlg    = document.getElementById("editDlg");
+const menuIdInp  = document.getElementById("menuId");
+const menuNameInp= document.getElementById("menuName");
+const partTbody  = document.getElementById("partTbody");
+
+let editingId=null;
+
+/* ===== リスナー ===== */
+onSnapshot(collection(db,"menus"),snap=>{
+  menuBody.innerHTML="";
+  snap.forEach(d=>{
+    const m=d.data();
+    const tr=document.createElement("tr");
+    tr.innerHTML=`
+      <td>${d.id}</td>
+      <td>${m.name}</td>
+      <td style="text-align:center;">${m.parts?.length||0}</td>
+      <td style="text-align:center;">
+        <button class="secondary icon" data-edit="${d.id}">編集</button>
+        <button class="secondary icon" data-del ="${d.id}">削除</button>
+      </td>`;
+    menuBody.appendChild(tr);
+  });
+});
+
+/* ===== 行ボタン ===== */
+menuBody.addEventListener("click",async e=>{
+  if(e.target.dataset.edit) loadMenu(e.target.dataset.edit);
+  if(e.target.dataset.del){
+    if(confirm("削除してよろしいですか？"))
+      await deleteDoc(doc(db,"menus",e.target.dataset.del));
+  }
+});
+
+/* ===== 新規追加 ===== */
+document.getElementById("addBtn").onclick=()=> openEditor({id:"",snap:{name:"",parts:[]}});
+
+/* ===== 編集ロード ===== */
+async function loadMenu(id){
+  const snap=await getDoc(doc(db,"menus",id));
+  if(snap.exists()) openEditor({id,snap:snap.data()});
+}
+
+/* ===== エディタ ===== */
+function openEditor({id,snap}){
+  editingId=id||"";
+  menuIdInp.disabled=!!id;
+  menuIdInp.value   = id;
+  menuNameInp.value = snap.name;
+  partTbody.innerHTML="";
+  snap.parts.forEach(p=> addPartRow(p.label,p.role));
+  editDlg.showModal();
+}
+
+/* ===== 部材行追加 ===== */
+function addPartRow(label="",role="pass"){
+  const tr=document.createElement("tr");
+  // ラベル
+  const tdLabel=document.createElement("td");
+  tdLabel.innerHTML=`<input type="text" value="${label}" placeholder="部材">`;
+  // 担当 select
+  const sel=document.createElement("select");
+  Object.entries(ROLES).forEach(([k,v])=>{
+    const opt=document.createElement("option");
+    opt.value=k; opt.textContent=v; if(role===k) opt.selected=true;
+    sel.appendChild(opt);
+  });
+  // 担当 td
+  const tdRole=document.createElement("td"); tdRole.appendChild(sel);
+  // 削除ボタン
+  const tdDel = document.createElement("td");
+  tdDel.innerHTML=`<button class="secondary icon">✖</button>`;
+  tdDel.querySelector("button").onclick=()=>tr.remove();
+  // 行を追加
+  tr.append(tdLabel,tdRole,tdDel);
+  partTbody.appendChild(tr);
+}
+document.getElementById("addPartBtn").onclick=()=> addPartRow();
+
+/* ===== 保存 ===== */
+document.getElementById("saveEdit").onclick=async()=>{
+  const id = editingId || menuIdInp.value.trim();
+  if(!id){alert("ID必須");return;}
+  const name = menuNameInp.value.trim() || "名称未設定";
+  const parts = [...partTbody.querySelectorAll("tr")].map(tr=>({
+      label:tr.querySelector("input").value.trim(),
+      role: tr.querySelector("select").value
+  })).filter(p=>p.label);
+  await setDoc(doc(db,"menus",id),{name,parts});
+  editDlg.close();
+};
+/* ===== キャンセル ===== */
+document.getElementById("cancelEdit").onclick=()=> editDlg.close();
+</script>
+</body>
+</html>

@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>担当ビュー | MateCook</title>
+<link rel="stylesheet" href="https://unpkg.com/@picocss/pico@latest/css/pico.min.css"/>
+<style>
+:root{--bg:#0f0f0f;--fg:#f0f0f0;--muted:#1f1f1f;--border:#333;
+      --warn:#ffbf00;--danger:#ff3333;--mine:#ffa500;}
+html,body{background:var(--bg);color:var(--fg);}     /* 余白も黒 */
+table,th,td{background:var(--muted);border-color:var(--border);color:var(--fg);}
+main{max-width:1000px;margin-inline:auto;}
+header{display:flex;flex-wrap:wrap;gap:1rem;align-items:flex-end;margin-bottom:1rem;}
+header h1{color:#fff}
+#clock{font-size:1.6rem;font-weight:600}
+.elapsed{font-variant-numeric:tabular-nums;}
+.done-btn{white-space:nowrap;}
+tr.warn   {border:2px solid var(--warn)  !important;}
+@keyframes blink{50%{border-color:transparent}}
+tr.overdue{border:2px solid var(--danger)!important;animation:blink 1s step-start infinite;}
+.myPart{color:var(--mine);font-weight:600;}
+dialog{max-width:500px;background:var(--muted);color:var(--fg);}
+</style>
+</head>
+<body>
+<main class="container">
+  <header style="width:100%;">
+    <h1>担当ビュー</h1>
+    <div>
+      現在時刻: <strong id="clock"></strong>　
+      担当: <strong id="roleNow"></strong>
+    </div>
+    <div style="margin-left:auto;">
+      <button id="roleBtn" class="secondary">⚙︎ 担当設定</button>
+    </div>
+  </header>
+
+  <table id="ordersTable">
+    <thead><tr><th>テーブル</th><th>メニュー</th><th>内訳</th><th>個数</th><th>経過</th><th></th></tr></thead>
+    <tbody></tbody>
+  </table>
+</main>
+
+<!-- ===== 担当ロール設定 ===== -->
+<dialog id="roleDlg"><article>
+  <h3>あなたの担当</h3>
+  <select id="roleSel">
+    <option value="grill">焼き場</option>
+    <option value="pass">デシャップ</option>
+    <option value="fryer">フライヤー</option>
+    <option value="sashimi">刺し場</option>
+  </select>
+  <footer style="display:flex;gap:.5rem;justify-content:flex-end;">
+    <button id="cancelRole" class="secondary">キャンセル</button>
+    <button id="saveRole"   class="contrast">保存</button>
+  </footer>
+</article></dialog>
+
+<!-- ===== 完了確認 ===== -->
+<dialog id="confirmDlg"><article>
+  <h3>完了でよろしいですか？</h3><p id="dlgTxt"></p>
+  <footer style="display:flex;gap:1rem;justify-content:flex-end;">
+    <button id="cCancel" class="secondary">キャンセル</button>
+    <button id="cOk"     class="contrast">完了</button>
+  </footer>
+</article></dialog>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.2/firebase-app.js";
+import { getFirestore, collection, doc, getDoc, setDoc,
+         onSnapshot, query, where, orderBy, updateDoc } from "https://www.gstatic.com/firebasejs/10.7.2/firebase-firestore.js";
+import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/10.7.2/firebase-auth.js";
+import { firebaseConfig } from "./firebase-config.js";
+
+/* ==== 定数 ==== */
+const ROLES = { grill:"焼き場", pass:"デシャップ",
+                fryer:"フライヤー", sashimi:"刺し場" };
+const WARN_MS = 10*60*1000, OVER_MS = 15*60*1000;
+
+/* ==== Firebase init ==== */
+const app = initializeApp(firebaseConfig);
+const db  = getFirestore(app);
+await signInAnonymously(getAuth(app));
+
+/* ==== DOM ==== */
+const tbody   = document.querySelector("#ordersTable tbody");
+const clock   = document.getElementById("clock");
+const roleNow = document.getElementById("roleNow");
+const roleDlg = document.getElementById("roleDlg");
+const roleSel = document.getElementById("roleSel");
+const roleBtn = document.getElementById("roleBtn");
+const confirmDlg = document.getElementById("confirmDlg");
+let dlgOrderId = null;
+
+/* ==== 自分のロール ==== */
+let myRole = null;
+const uid = (await getAuth().currentUser).uid;
+const staffRef = doc(db,"staff",uid);
+const staffSnap = await getDoc(staffRef);
+if(staffSnap.exists()) myRole = staffSnap.data().role;
+roleSel.value = myRole || "grill";
+roleNow.textContent = ROLES[myRole] || "未設定";
+roleBtn.onclick = ()=>{ roleSel.value=myRole||"grill"; roleDlg.showModal(); };
+document.getElementById("cancelRole").onclick = ()=> roleDlg.close();
+document.getElementById("saveRole").onclick   = async ()=>{
+  myRole = roleSel.value;
+  await setDoc(staffRef,{role:myRole},{merge:true});
+  roleNow.textContent = ROLES[myRole];
+  roleDlg.close();
+  applyHighlight();
+};
+
+/* ==== 時計 ==== */
+setInterval(()=>clock.textContent =
+  new Date().toLocaleTimeString("ja-JP",{hour12:false}),1000);
+
+/* ==== メニュー /menus ==== */
+let menuMap={};        // {menuId:{name,parts[]}}
+onSnapshot(collection(db,"menus"),snap=>{
+  menuMap={};
+  snap.forEach(d=>menuMap[d.id]=d.data());
+});
+
+/* ==== オーダーlistener ==== */
+onSnapshot(
+  query(collection(db,"orders"),
+        where("status","in",["pending","cooking"]),
+        orderBy("createdAt")),
+snap=>{
+  tbody.innerHTML="";
+  snap.forEach(d=>{
+    const o={id:d.id,...d.data()};
+    renderRows(o).forEach(r=>tbody.appendChild(r));
+  });
+  tickElapsed(); applyHighlight();
+});
+
+/* ==== 行描画 ==== */
+function renderRows(order){
+  const items = order.items?.length ? order.items :
+                [{menuId:order.menuId,qty:order.qty||1}];
+  return items.map(i=>{
+    const m = menuMap[i.menuId]||{};
+    const htmlParts = (m.parts||[]).map(p=>
+      `<span data-role="${p.role}">${p.label}</span>`).join("<br>");
+    const tr=document.createElement("tr");
+    tr.innerHTML=`<td>${order.tableNo||"-"}</td>
+      <td>${m.name||i.menuId}</td>
+      <td>${htmlParts}</td>
+      <td>${i.qty}</td>
+      <td class="elapsed" data-ts="${order.createdAt?.toMillis?.()||Date.now()}"></td>
+      <td><button class="done-btn" data-id="${order.id}">完了</button></td>`;
+    return tr;
+  });
+}
+
+/* ==== ハイライト ==== */
+function applyHighlight(){
+  tbody.querySelectorAll("td:nth-child(3) span").forEach(sp=>{
+    sp.classList.toggle("myPart", sp.dataset.role === myRole);
+  });
+}
+
+/* ==== 経過時間 ==== */
+function tickElapsed(){
+  const now=Date.now();
+  tbody.querySelectorAll(".elapsed").forEach(el=>{
+    const diff=now-Number(el.dataset.ts);
+    el.textContent=Math.floor(diff/60000)+"分";
+    const row=el.closest("tr");
+    row.classList.remove("warn","overdue");
+    if(diff>=OVER_MS) row.classList.add("overdue");
+    else if(diff>=WARN_MS) row.classList.add("warn");
+  });
+}
+setInterval(tickElapsed,10000);
+
+/* ==== 完了 ==== */
+tbody.addEventListener("click",e=>{
+  if(!e.target.matches(".done-btn")) return;
+  dlgOrderId=e.target.dataset.id;
+  const row=e.target.closest("tr");
+  document.getElementById("dlgTxt").textContent=
+    `テーブル ${row.children[0].textContent} / ${row.children[1].textContent}`;
+  confirmDlg.showModal();
+});
+document.getElementById("cCancel").onclick=()=>confirmDlg.close();
+document.getElementById("cOk").onclick=async()=>{
+  if(dlgOrderId) await updateDoc(doc(db,"orders",dlgOrderId),{status:"done"});
+  dlgOrderId=null; confirmDlg.close();
+};
+</script>
+</body>
+</html>
